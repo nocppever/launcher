@@ -40,9 +40,43 @@
 #define WDT_TIMEOUT 15  // Watchdog timeout in seconds
 #define BUTTON_HOLD_TIME 3000  // Time to hold button in ms
 
+
+#define CIRCLE_RADIUS 45
+#define CIRCLE_SPACING 90
+#define CIRCLE_Y 120
+#define ANIMATION_STEPS 10
+#define ANIMATION_DELAY 30
+
+#define DRAW_BUFFER_SIZE (SCREEN_WIDTH * 150)  // Buffer for partial screen updates
+static uint16_t* drawBuffer = nullptr;
+
+
+#define SPRITE_WIDTH 320
+#define SPRITE_HEIGHT 240
+#define EASING_STEPS 40
+#define TRANSITION_DURATION 100 // milliseconds
+
+#define ANIMATION_DURATION 250  // Slightly faster animation
+#define MIN_FRAME_TIME 16      // Cap at ~60fps
+
+#define ANIMATION_BUFFER_HEIGHT 180  // Height of the animation area
+#define ANIMATION_Y_START 40         // Start Y position of animation area
+
+#define RGB565(r,g,b) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
+#define R565(color) ((color >> 11) & 0x1F)
+#define G565(color) ((color >> 5) & 0x3F)
+#define B565(color) (color & 0x1F)
+
+#define ICON_SIZE 64
+#define DEFAULT_ICONS_COUNT 5
+#define ICON_PATH "/icons"
+
+#define RGB565(r, g, b) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
+#define DARKEN_COLOR(color) (((color & 0xF7DE) >> 1) | (color & 0x0821))
+
 // WiFi credentials
-const char* ssid = "";
-const char* password = "";
+const char* ssid = "Freebox-C2F799";
+const char* password = "k2br9qc4z6qfcr6nq2mmsd";
 
 // Global variables
 AsyncWebServer server(80);
@@ -56,19 +90,67 @@ RTC_DATA_ATTR int bootCount = 0;
 struct FirmwareEntry {
     String name;
     String path;
+    String iconPath;
+    bool hasCustomIcon;
+    int defaultIconIndex;
 };
+
+enum MenuOption {
+    OPTION_NONE = -1,
+    OPTION_1 = 0,
+    OPTION_2 = 1,
+    OPTION_3 = 2
+};
+
+struct MenuState {
+    MenuOption selectedOption = OPTION_1;
+    bool isAnimating = false;
+    int animationStep = 0;
+};
+
+MenuState menuState;
+
+
+struct IconData {
+    const uint16_t* data;
+    uint16_t width;
+    uint16_t height;
+};
+
+
+
+struct {
+    int selectedIndex = 0;
+    int animationStep = 0;
+    bool isAnimating = false;
+    int animationDirection = 0;  // -1 for left, 1 for right
+    int lastAnimationUpdate = 0;
+} uiState;
+
 
 enum Screen {
-    MAIN_SCREEN,
-    SETTINGS_SCREEN,
-    WIFI_SCREEN,
-    FIRMWARE_OPTIONS_SCREEN
+    MAIN_MENU,
+    SETTINGS_MENU,
+    WIFI_MENU,
+    FIRMWARE_OPTIONS
 };
 
-Screen currentScreen = MAIN_SCREEN;
+Screen currentScreen = MAIN_MENU;
 std::vector<FirmwareEntry> firmwareList;
 int currentPage = 0;
 int totalPages = 0;
+
+static uint32_t animationStartTime = 0;
+static uint32_t lastDrawTime = 0;
+static float currentOffset = 0.0f;
+static float targetOffset = 0.0f;
+
+static uint16_t* animationBuffer = nullptr;
+
+
+static uint16_t gearIconData[ICON_SIZE * ICON_SIZE];
+static uint16_t defaultIconsData[DEFAULT_ICONS_COUNT][ICON_SIZE * ICON_SIZE];
+
 
 void drawHeader(bool animated);
 void transitionToScreen(void (*drawFunc)());
@@ -83,6 +165,237 @@ void deleteFirmware(int index);
 void deleteAllFirmware();
 void showPopup(const char* message, uint16_t color, int duration);
 void drawButton(int x, int y, int w, int h, const char* text, uint16_t color, bool rounded);
+
+
+
+
+void generateGearIcon() {
+    const int teeth = 12;
+    const float innerRadius = ICON_SIZE * 0.3;
+    const float outerRadius = ICON_SIZE * 0.45;
+    const float centerX = ICON_SIZE / 2;
+    const float centerY = ICON_SIZE / 2;
+
+    for (int y = 0; y < ICON_SIZE; y++) {
+        for (int x = 0; x < ICON_SIZE; x++) {
+            float dx = x - centerX;
+            float dy = y - centerY;
+            float angle = atan2(dy, dx);
+            float radius = sqrt(dx * dx + dy * dy);
+            
+            // Create gear teeth pattern
+            float teethRadius = outerRadius + cos(teeth * angle) * (outerRadius - innerRadius) * 0.4;
+            
+            if (radius < innerRadius * 0.7) {
+                // Inner circle
+                gearIconData[y * ICON_SIZE + x] = RGB565(180, 180, 180);
+            } else if (radius < teethRadius) {
+                // Teeth
+                gearIconData[y * ICON_SIZE + x] = RGB565(120, 120, 120);
+            } else {
+                // Background
+                gearIconData[y * ICON_SIZE + x] = RGB565(32, 32, 32);
+            }
+        }
+    }
+}
+
+// Function to generate default icons
+void generateDefaultIcons() {
+    const uint16_t colors[DEFAULT_ICONS_COUNT][3] = {
+        {0x4A, 0x90, 0xE2},  // Blue
+        {0xF3, 0x9C, 0x12},  // Orange
+        {0x2E, 0xCC, 0x71},  // Green
+        {0x9B, 0x59, 0xB6},  // Purple
+        {0xE7, 0x4C, 0x3C}   // Red
+    };
+
+    for (int icon = 0; icon < DEFAULT_ICONS_COUNT; icon++) {
+        // Create unique patterns for each icon
+        switch (icon) {
+            case 0: // Circuit pattern
+                for (int y = 0; y < ICON_SIZE; y++) {
+                    for (int x = 0; x < ICON_SIZE; x++) {
+                        bool line = (x + y) % 16 < 4 || (x - y + ICON_SIZE) % 16 < 4;
+                        defaultIconsData[icon][y * ICON_SIZE + x] = line ? 
+                            RGB565(colors[icon][0], colors[icon][1], colors[icon][2]) :
+                            RGB565(32, 32, 32);
+                    }
+                }
+                break;
+
+            case 1: // Hexagon pattern
+                for (int y = 0; y < ICON_SIZE; y++) {
+                    for (int x = 0; x < ICON_SIZE; x++) {
+                        float dx = x - ICON_SIZE/2;
+                        float dy = (y - ICON_SIZE/2) * 1.732;
+                        float hex = (fmod(dx + dy, 20) < 10) ^ (fmod(dx - dy, 20) < 10);
+                        defaultIconsData[icon][y * ICON_SIZE + x] = hex ?
+                            RGB565(colors[icon][0], colors[icon][1], colors[icon][2]) :
+                            RGB565(32, 32, 32);
+                    }
+                }
+                break;
+
+            case 2: // Concentric circles
+                for (int y = 0; y < ICON_SIZE; y++) {
+                    for (int x = 0; x < ICON_SIZE; x++) {
+                        float dx = x - ICON_SIZE/2;
+                        float dy = y - ICON_SIZE/2;
+                        float dist = sqrt(dx*dx + dy*dy);
+                        bool ring = int(dist) % 10 < 5;
+                        defaultIconsData[icon][y * ICON_SIZE + x] = ring ?
+                            RGB565(colors[icon][0], colors[icon][1], colors[icon][2]) :
+                            RGB565(32, 32, 32);
+                    }
+                }
+                break;
+
+            case 3: // Diamond pattern
+                for (int y = 0; y < ICON_SIZE; y++) {
+                    for (int x = 0; x < ICON_SIZE; x++) {
+                        float dx = abs(x - ICON_SIZE/2);
+                        float dy = abs(y - ICON_SIZE/2);
+                        bool diamond = (dx + dy) < ICON_SIZE/2;
+                        defaultIconsData[icon][y * ICON_SIZE + x] = diamond ?
+                            RGB565(colors[icon][0], colors[icon][1], colors[icon][2]) :
+                            RGB565(32, 32, 32);
+                    }
+                }
+                break;
+
+            case 4: // Starburst pattern
+                for (int y = 0; y < ICON_SIZE; y++) {
+                    for (int x = 0; x < ICON_SIZE; x++) {
+                        float dx = x - ICON_SIZE/2;
+                        float dy = y - ICON_SIZE/2;
+                        float angle = atan2(dy, dx);
+                        bool ray = fmod(angle * 8 / M_PI + 16, 2) < 1;
+                        defaultIconsData[icon][y * ICON_SIZE + x] = ray ?
+                            RGB565(colors[icon][0], colors[icon][1], colors[icon][2]) :
+                            RGB565(32, 32, 32);
+                    }
+                }
+                break;
+        }
+    }
+}
+
+
+
+void initAnimationBuffer() {
+    if (animationBuffer != nullptr) {
+        free(animationBuffer);
+    }
+    animationBuffer = (uint16_t*)ps_malloc(SCREEN_WIDTH * ANIMATION_BUFFER_HEIGHT * sizeof(uint16_t));
+    if (!animationBuffer) {
+        Serial.println("Failed to allocate animation buffer!");
+    }
+}
+
+
+
+float easeOutCubic(float t) {
+    return 1.0f - powf(1.0f - t, 3.0f);
+}
+
+uint16_t swapBytes(uint16_t color) {
+    return (color >> 8) | (color << 8);
+}
+
+// Update the dimColor function
+uint16_t dimColor(uint16_t color, uint8_t factor) {
+    // Extract RGB components
+    uint8_t r = (color >> 11) & 0x1F;
+    uint8_t g = (color >> 5) & 0x3F;
+    uint8_t b = color & 0x1F;
+    
+    // Convert to 8-bit values
+    r = (r << 3) | (r >> 2);
+    g = (g << 2) | (g >> 4);
+    b = (b << 3) | (b >> 2);
+    
+    // Apply dimming
+    r = (r * factor) / 255;
+    g = (g * factor) / 255;
+    b = (b * factor) / 255;
+    
+    // Convert back to RGB565
+    return M5.Lcd.color565(r, g, b);
+}
+
+
+
+void drawButtonHints(const char* btnA, const char* btnB, const char* btnC) {
+    uint16_t normalColor = BUTTON_COLOR;
+    uint16_t pressedColor = BUTTON_HIGHLIGHT;
+
+    // Button A (Left)
+    uint16_t colorA = M5.BtnA.isPressed() ? pressedColor : normalColor;
+    M5.Lcd.fillRoundRect(5, SCREEN_HEIGHT-30, 70, 20, 5, colorA);
+    M5.Lcd.setTextColor(TEXT_COLOR);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setCursor(15, SCREEN_HEIGHT-25);
+    M5.Lcd.print(btnA);
+
+    // Button B (Center)
+    uint16_t colorB = M5.BtnB.isPressed() ? pressedColor : normalColor;
+    M5.Lcd.fillRoundRect(SCREEN_WIDTH/2-35, SCREEN_HEIGHT-30, 70, 20, 5, colorB);
+    M5.Lcd.setTextColor(TEXT_COLOR);
+    M5.Lcd.setCursor(SCREEN_WIDTH/2-25, SCREEN_HEIGHT-25);
+    M5.Lcd.print(btnB);
+
+    // Button C (Right)
+    uint16_t colorC = M5.BtnC.isPressed() ? pressedColor : normalColor;
+    M5.Lcd.fillRoundRect(SCREEN_WIDTH-75, SCREEN_HEIGHT-30, 70, 20, 5, colorC);
+    M5.Lcd.setTextColor(TEXT_COLOR);
+    M5.Lcd.setCursor(SCREEN_WIDTH-65, SCREEN_HEIGHT-25);
+    M5.Lcd.print(btnC);
+}
+
+
+void drawMenuOptions(const char* options[], int numOptions, int selectedOption) {
+    for (int i = 0; i < numOptions; i++) {
+        int yPos = 60 + i * 60;
+        uint16_t color = (i == selectedOption) ? BUTTON_HIGHLIGHT : BUTTON_COLOR;
+        drawButton(40, yPos, SCREEN_WIDTH - 80, BUTTON_HEIGHT, options[i], color, true);
+    }
+}
+
+
+void drawCircularIcon(int x, int y, int radius, const char* text, bool selected) {
+    uint16_t baseColor = selected ? BUTTON_HIGHLIGHT : BUTTON_COLOR;
+    
+    // Draw shadow for selected item
+    if (selected) {
+        for(int r = radius + 5; r > radius; r--) {
+            M5.Lcd.drawCircle(x, y, r, dimColor(baseColor, 100));
+        }
+    }
+    
+    // Draw main circle with gradient
+    for(int r = radius; r > radius-8; r--) {
+        uint16_t gradColor = dimColor(baseColor, 150 + (radius-r)*12);
+        M5.Lcd.drawCircle(x, y, r, gradColor);
+    }
+    M5.Lcd.fillCircle(x, y, radius-8, baseColor);
+    
+    // Draw text
+    M5.Lcd.setTextSize(selected ? 2 : 1);
+    int charWidth = selected ? 12 : 6;
+    int textWidth = strlen(text) * charWidth;
+    
+    // Draw text shadow for selected item
+    if (selected) {
+        M5.Lcd.setTextColor(TFT_BLACK);
+        M5.Lcd.setCursor(x - textWidth/2 + 1, y - 8 + 1);
+        M5.Lcd.print(text);
+    }
+    
+    M5.Lcd.setTextColor(TEXT_COLOR);
+    M5.Lcd.setCursor(x - textWidth/2, y - 8);
+    M5.Lcd.print(text);
+}
 
 void enforceFactoryBoot() {
     const esp_partition_t* factory = esp_partition_find_first(
@@ -102,7 +415,25 @@ void enforceFactoryBoot() {
     }
 }
 
-
+void drawNavigationHints() {
+    if (uiState.selectedIndex > 0) {
+        M5.Lcd.fillTriangle(10, CIRCLE_Y, 30, CIRCLE_Y-20, 30, CIRCLE_Y+20, 
+                           dimColor(BUTTON_COLOR, 150));
+        M5.Lcd.setTextColor(TEXT_COLOR);
+        M5.Lcd.setTextSize(1);
+        M5.Lcd.setCursor(15, SCREEN_HEIGHT-25);
+        M5.Lcd.print("BTN A");
+    }
+    
+    if (uiState.selectedIndex < firmwareList.size()) {
+        M5.Lcd.fillTriangle(SCREEN_WIDTH-10, CIRCLE_Y, 
+                           SCREEN_WIDTH-30, CIRCLE_Y-20, 
+                           SCREEN_WIDTH-30, CIRCLE_Y+20, 
+                           dimColor(BUTTON_COLOR, 150));
+        M5.Lcd.setCursor(SCREEN_WIDTH-45, SCREEN_HEIGHT-25);
+        M5.Lcd.print("BTN C");
+    }
+}
 
 void printPartitionInfo() {
     const esp_partition_t* running = esp_ota_get_running_partition();
@@ -168,6 +499,45 @@ bool checkButtonPress() {
     }
     return false;
 }
+
+
+void drawFirmwareOptions() {
+    M5.Lcd.fillScreen(BG_COLOR);
+    drawHeader(false);
+
+    M5.Lcd.setCursor(10, 50);
+    M5.Lcd.printf("Selected: %s", firmwareList[uiState.selectedIndex].name.c_str());
+
+    const char* options[] = {
+        "Launch",
+        "Delete",
+        "Back"
+    };
+
+    drawMenuOptions(options, 3, menuState.selectedOption);
+    drawButtonHints("↑ Up", "Select", "↓ Down");
+}
+
+
+void drawDeleteConfirm() {
+    M5.Lcd.fillScreen(BG_COLOR);
+    drawHeader(false);
+    
+    M5.Lcd.setCursor(20, 60);
+    M5.Lcd.print("Are you sure you want to");
+    M5.Lcd.setCursor(20, 85);
+    M5.Lcd.print("delete this firmware?");
+
+    const char* options[] = {
+        "Yes",
+        "No"
+    };
+
+    drawMenuOptions(options, 2, menuState.selectedOption);
+    drawButtonHints("↑ Up", "Select", "↓ Down");
+}
+
+
 
 // Implementation of utility functions
 void drawButton(int x, int y, int w, int h, const char* text, uint16_t color, bool rounded ) {
@@ -257,57 +627,358 @@ void loadFirmwareList() {
         return;
     }
 
+    // Create icons directory if it doesn't exist
+    if (!SD.exists(ICON_PATH)) {
+        SD.mkdir(ICON_PATH);
+    }
+
     File file = root.openNextFile();
     while (file) {
         if (!file.isDirectory() && String(file.name()).endsWith(".bin")) {
             FirmwareEntry entry;
             entry.name = file.name();
+            entry.name.replace(".bin", ""); // Remove .bin extension for display
             entry.path = String(FIRMWARE_PATH) + "/" + file.name();
+            
+            // Check for matching icon
+            String iconName = String(file.name());
+            iconName.replace(".bin", ".png");
+            String iconPath = String(ICON_PATH) + "/" + iconName;
+            
+            if (SD.exists(iconPath)) {
+                entry.iconPath = iconPath;
+                entry.hasCustomIcon = true;
+            } else {
+                entry.hasCustomIcon = false;
+                entry.defaultIconIndex = random(DEFAULT_ICONS_COUNT);
+            }
+            
             firmwareList.push_back(entry);
         }
         file = root.openNextFile();
     }
     root.close();
+
+    // Add settings entry
+    FirmwareEntry settingsEntry;
+    settingsEntry.name = "Settings";
+    settingsEntry.hasCustomIcon = false;
+    settingsEntry.defaultIconIndex = -1; // Special case for gear icon
+    firmwareList.push_back(settingsEntry);
 }
 
-void drawScreen() {
+
+
+void drawSettingsMenu() {
     M5.Lcd.fillScreen(BG_COLOR);
     drawHeader(false);
+
+    // Draw menu options centered and bigger
+    int yPos = SCREEN_HEIGHT/2 - 80;  // Start higher for better spacing
     
-    totalPages = (firmwareList.size() + MAX_ITEMS_PER_PAGE - 1) / MAX_ITEMS_PER_PAGE;
-    int startIdx = currentPage * MAX_ITEMS_PER_PAGE;
-    int endIdx = min(startIdx + MAX_ITEMS_PER_PAGE, (int)firmwareList.size());
+    // Delete All (Button A)
+    drawButton(40, yPos, SCREEN_WIDTH - 80, BUTTON_HEIGHT, "Delete All", DANGER_COLOR, true);
     
-    for (int i = startIdx; i < endIdx; i++) {
-        int yPos = 50 + (i - startIdx) * (BUTTON_HEIGHT + BUTTON_SPACING);
-        int xPos = -SCREEN_WIDTH;
-        
-        while (xPos < 10) {
-            M5.Lcd.fillRect(0, yPos, SCREEN_WIDTH, BUTTON_HEIGHT, BG_COLOR);
-            drawButton(xPos, yPos, SCREEN_WIDTH - 20, BUTTON_HEIGHT, 
-                      firmwareList[i].name.c_str(), BUTTON_COLOR, false);
-            xPos += 20;
-            delay(5);
+    // WiFi Mode (Button B)
+    drawButton(40, yPos + 70, SCREEN_WIDTH - 80, BUTTON_HEIGHT, "WiFi Mode", BUTTON_COLOR, true);
+    
+    // Back (Button C)
+    drawButton(40, yPos + 140, SCREEN_WIDTH - 80, BUTTON_HEIGHT, "Back", BUTTON_COLOR, true);
+
+    // Draw button hints
+    drawButtonHints("Delete", "WiFi", "Back");
+}
+
+
+void drawCircleInBuffer(int x0, int y0, int r, uint16_t color,
+                       const std::function<void(int,int,uint16_t)>& setPixel) {
+    int16_t x = 0;
+    int16_t y = r;
+    int16_t err = 3 - 2 * r;
+
+    while (y >= x) {
+        setPixel(x0 + x, y0 + y, color);
+        setPixel(x0 - x, y0 + y, color);
+        setPixel(x0 + x, y0 - y, color);
+        setPixel(x0 - x, y0 - y, color);
+        setPixel(x0 + y, y0 + x, color);
+        setPixel(x0 - y, y0 + x, color);
+        setPixel(x0 + y, y0 - x, color);
+        setPixel(x0 - y, y0 - x, color);
+
+        if (err <= 0) {
+            x++;
+            err += 4 * x + 6;
+        } else {
+            y--;
+            err += 4 * (x - y) + 10;
         }
-    }
-    
-    drawButton(90, 190, 140, 40, "WiFi Upload", BUTTON_COLOR, false);
-    
-    if (totalPages > 1) {
-        if (currentPage > 0) {
-            drawButton(10, 190, 70, 40, "<<", BUTTON_COLOR, false);
-        }
-        if (currentPage < totalPages - 1) {
-            drawButton(SCREEN_WIDTH - 80, 190, 70, 40, ">>", BUTTON_COLOR, false);
-        }
-        
-        char pageText[20];
-        sprintf(pageText, "%d/%d", currentPage + 1, totalPages);
-        M5.Lcd.setTextColor(TEXT_COLOR);
-        M5.Lcd.setCursor((SCREEN_WIDTH - strlen(pageText) * 12) / 2, 200);
-        M5.Lcd.print(pageText);
     }
 }
+
+// Helper function to draw text in buffer
+    const uint8_t font8x6[96][8] = {
+        // Define the font8x6 array here with appropriate values
+        // Example for character 'A' (ASCII 65):
+        {0x00, 0x7C, 0x12, 0x11, 0x12, 0x7C, 0x00, 0x00}, // 'A'
+        // Add other characters as needed
+    };
+    
+void drawTextInBuffer(int x, int y, const char* text, bool selected, 
+                              const std::function<void(int,int,uint16_t)>& setPixel) {
+            int charWidth = selected ? 12 : 6;
+            int textWidth = strlen(text) * charWidth;
+            int textX = x - textWidth / 2;
+            int textY = y - (selected ? 8 : 4);
+        
+            for (int i = 0; text[i] != '\0'; i++) {
+                char c = text[i];
+                for (int py = 0; py < 8; py++) {
+                    for (int px = 0; px < 6; px++) {
+                        if (font8x6[c - 32][py] & (1 << px)) {
+                            setPixel(textX + i * charWidth + px, textY + py, TEXT_COLOR);
+                        }
+                    }
+                }
+            }
+        }
+
+// Helper function to fill circle in buffer
+void fillCircleInBuffer(int x0, int y0, int r, uint16_t color,
+                       const std::function<void(int,int,uint16_t)>& setPixel) {
+    int16_t x = 0;
+    int16_t y = r;
+    int16_t err = 3 - 2 * r;
+
+    while (y >= x) {
+        // Draw horizontal lines for each octant
+        for (int16_t i = x0 - x; i <= x0 + x; ++i) {
+            setPixel(i, y0 + y, color);
+            setPixel(i, y0 - y, color);
+        }
+        for (int16_t i = x0 - y; i <= x0 + y; ++i) {
+            setPixel(i, y0 + x, color);
+            setPixel(i, y0 - x, color);
+        }
+
+        if (err <= 0) {
+            x++;
+            err += 4 * x + 6;
+        } else {
+            y--;
+            err += 4 * (x - y) + 10;
+        }
+    }
+}
+
+void drawIconToBuffer(int x, int y, int radius, const FirmwareEntry& entry, bool selected) {
+    if (!animationBuffer) return;
+
+    // Calculate scaling and position
+    float scale = (float)radius * 2 / ICON_SIZE;
+    int startX = x - radius;
+    int startY = y - radius;
+    
+    // Get the appropriate icon data
+    const uint16_t* iconData;
+    if (entry.name == "Settings") {
+        iconData = gearIconData;
+    } else if (entry.hasCustomIcon) {
+        // Load custom icon from SD card
+        File iconFile = SD.open(entry.iconPath);
+        if (iconFile) {
+            // For now, fallback to default if custom icon exists
+            // In a future update, implement proper PNG loading
+            iconData = defaultIconsData[entry.defaultIconIndex];
+            iconFile.close();
+        } else {
+            iconData = defaultIconsData[entry.defaultIconIndex];
+        }
+    } else {
+        iconData = defaultIconsData[entry.defaultIconIndex];
+    }
+
+    // Draw the icon with scaling
+    for (int dy = -radius; dy < radius; dy++) {
+        for (int dx = -radius; dx < radius; dx++) {
+            // Calculate source pixel
+            int sourceY = (dy + radius) * ICON_SIZE / (radius * 2);
+            
+            // Calculate source pixel
+            int sourceX = (dx + radius) * ICON_SIZE / (radius * 2);
+
+            // Check bounds
+            if (sourceX >= 0 && sourceX < ICON_SIZE && sourceY >= 0 && sourceY < ICON_SIZE) {
+                // Calculate destination position
+                int destX = x + dx;
+                int destY = y + dy;
+                
+                if (destX >= 0 && destX < SCREEN_WIDTH && 
+                    destY >= 0 && destY < ANIMATION_BUFFER_HEIGHT) {
+                    
+                    // Get source pixel
+                    uint16_t color = iconData[sourceY * ICON_SIZE + sourceX];
+                    
+                    // Add highlight effect if selected
+                    if (selected) {
+                        // Create a glow effect around the icon
+                        float distFromCenter = sqrt(dx*dx + dy*dy) / radius;
+                        if (distFromCenter > 0.8 && distFromCenter < 1.0) {
+                            // Add glow at the edges
+                            uint16_t r = ((color >> 11) & 0x1F);
+                            uint16_t g = ((color >> 5) & 0x3F);
+                            uint16_t b = (color & 0x1F);
+                            
+                            r = min(0x1F, r + 4);
+                            g = min(0x3F, g + 8);
+                            b = min(0x1F, b + 4);
+                            
+                            color = (r << 11) | (g << 5) | b;
+                        }
+                    }
+                    
+                    // Store in animation buffer with byte swapping for M5Stack
+                    animationBuffer[destY * SCREEN_WIDTH + destX] = (color >> 8) | (color << 8);
+                }
+            }
+        }
+    }
+    
+    // Draw icon name below
+    if (!entry.name.isEmpty()) {
+        M5.Lcd.setTextColor(TEXT_COLOR);
+        M5.Lcd.setTextSize(selected ? 2 : 1);
+        int textWidth = entry.name.length() * (selected ? 12 : 6);
+        M5.Lcd.setCursor(x - textWidth/2, y + radius + 5);
+        M5.Lcd.print(entry.name);
+    }
+}
+    
+
+void handleUpload(AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
+    static File uploadFile;
+    static String currentFilePath;
+    
+    if (!index) {
+        String uploadPath;
+        if (filename.endsWith(".bin")) {
+            uploadPath = String(FIRMWARE_PATH) + "/" + filename;
+        } else if (filename.endsWith(".png")) {
+            if (!SD.exists(ICON_PATH)) {
+                SD.mkdir(ICON_PATH);
+            }
+            uploadPath = String(ICON_PATH) + "/" + filename;
+        } else {
+            return; // Unsupported file type
+        }
+        
+        Serial.printf("Upload Start: %s\n", uploadPath.c_str());
+        uploadFile = SD.open(uploadPath, FILE_WRITE);
+        currentFilePath = uploadPath;
+    }
+    
+    if (uploadFile && len) {
+        uploadFile.write(data, len);
+    }
+    
+    if (final) {
+        if (uploadFile) {
+            uploadFile.close();
+            Serial.printf("Upload Complete: %s, %u bytes\n", currentFilePath.c_str(), index + len);
+            
+            if (currentFilePath.endsWith(".bin")) {
+                loadFirmwareList(); // Reload firmware list when new firmware is uploaded
+            }
+        }
+    }
+}
+
+
+
+
+
+void drawScreen() {
+    if (!animationBuffer) return;
+    
+    uint32_t currentTime = millis();
+    if (currentTime - lastDrawTime < MIN_FRAME_TIME) {
+        return;
+    }
+    lastDrawTime = currentTime;
+
+    if (currentScreen == MAIN_MENU) {
+        static bool firstDraw = true;
+        
+        if (firstDraw || !uiState.isAnimating) {
+            M5.Lcd.fillScreen(BG_COLOR);
+            drawHeader(false);
+            firstDraw = false;
+        }
+
+        // Clear animation buffer
+        uint16_t bgColor = ((BG_COLOR & 0xFF) << 8) | ((BG_COLOR >> 8) & 0xFF);
+        for (int i = 0; i < SCREEN_WIDTH * ANIMATION_BUFFER_HEIGHT; i++) {
+            animationBuffer[i] = bgColor;
+        }
+
+        int centerX = SCREEN_WIDTH / 2;
+        float animationOffset = 0;
+        
+        if (uiState.isAnimating) {
+            uint32_t elapsed = currentTime - animationStartTime;
+            float progress = min(1.0f, (float)elapsed / ANIMATION_DURATION);
+            animationOffset = targetOffset * easeOutCubic(progress);
+            
+            if (progress >= 1.0f) {
+                uiState.isAnimating = false;
+                animationOffset = 0;
+                targetOffset = 0;
+            }
+        }
+        
+        // Draw icons
+        int totalItems = firmwareList.size();
+        for (int i = -1; i <= 1; i++) {
+            int index = uiState.selectedIndex + i;
+            if (index >= 0 && index < totalItems) {
+                float offset = i * CIRCLE_SPACING + animationOffset;
+                int x = centerX + offset;
+                
+                if (x >= -CIRCLE_RADIUS && x <= SCREEN_WIDTH + CIRCLE_RADIUS) {
+                    float distFromCenter = abs(offset) / CIRCLE_SPACING;
+                    float scale = 1.0f - (distFromCenter * 0.3f);
+                    scale = max(0.0f, min(1.0f, scale));
+                    
+                    int radius = CIRCLE_RADIUS * scale;
+                    if (radius > 0) {
+                        drawIconToBuffer(x, CIRCLE_Y - ANIMATION_Y_START, radius, 
+                                    firmwareList[index],
+                                    index == uiState.selectedIndex && !uiState.isAnimating);
+                    }
+                }
+            }
+        }
+        
+        // Push buffer to screen
+        M5.Lcd.pushImage(0, ANIMATION_Y_START, SCREEN_WIDTH, ANIMATION_BUFFER_HEIGHT, animationBuffer);
+        
+        // Draw navigation elements
+        if (!uiState.isAnimating) {
+            if (uiState.selectedIndex > 0) {
+                M5.Lcd.fillTriangle(10, CIRCLE_Y, 30, CIRCLE_Y-20, 30, CIRCLE_Y+20, BUTTON_COLOR);
+            }
+            
+            if (uiState.selectedIndex < totalItems - 1) {
+                M5.Lcd.fillTriangle(SCREEN_WIDTH-10, CIRCLE_Y, 
+                                SCREEN_WIDTH-30, CIRCLE_Y-20, 
+                                SCREEN_WIDTH-30, CIRCLE_Y+20, BUTTON_COLOR);
+            }
+            
+            drawButtonHints("←", "Select", "→");
+        }
+    }
+}
+
 
 bool startWiFiServer() {
     WiFi.begin(ssid, password);
@@ -332,182 +1003,256 @@ bool startWiFiServer() {
         return false;
     }
 
-    server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        String html = R"(
+      server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+        request->send(200, "text/html", R"(
 <!DOCTYPE html>
 <html>
 <head>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>M5Stack Firmware Uploader</title>
-    <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            margin: 0;
-            padding: 20px;
-            background: linear-gradient(135deg, #1a1a2e, #16213e);
-            color: #fff;
-            min-height: 100vh;
-        }
-        .container {
-            max-width: 600px;
-            margin: 0 auto;
-            background: rgba(255, 255, 255, 0.1);
-            padding: 30px;
-            border-radius: 15px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-            backdrop-filter: blur(10px);
-        }
-        h1 {
-            color: #fff;
-            text-align: center;
-            margin-bottom: 30px;
-            font-size: 2.5em;
-            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
-        }
-        .upload-form {
-            display: flex;
-            flex-direction: column;
-            gap: 20px;
-            align-items: center;
-        }
-        .file-input-container {
-            width: 100%;
-            position: relative;
-        }
-        .file-input {
-            width: 100%;
-            padding: 15px;
-            border: 2px dashed #4a90e2;
-            border-radius: 10px;
-            background: rgba(255, 255, 255, 0.05);
-            color: #fff;
-            cursor: pointer;
-            transition: all 0.3s ease;
-        }
-        .file-input:hover {
-            border-color: #64b5f6;
-            background: rgba(255, 255, 255, 0.1);
-        }
-        .submit-btn {
-            padding: 15px 40px;
-            background: #4a90e2;
-            color: white;
-            border: none;
-            border-radius: 25px;
-            font-size: 1.1em;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        .submit-btn:hover {
-            background: #357abd;
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(74, 144, 226, 0.3);
-        }
-        .progress {
-            width: 100%;
-            height: 10px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 5px;
-            margin-top: 20px;
-            overflow: hidden;
-            display: none;
-        }
-        .progress-bar {
-            width: 0%;
-            height: 100%;
-            background: #4a90e2;
-            transition: width 0.3s ease;
-        }
-        @media (max-width: 480px) {
-            .container {
-                padding: 20px;
-            }
-            h1 {
-                font-size: 2em;
+    <!-- Load dependencies in the correct order -->
+    <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        // Configure Tailwind
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {}
             }
         }
-    </style>
+    </script>
 </head>
 <body>
-    <div class="container">
-        <h1>M5Stack Firmware Uploader</h1>
-        <form class="upload-form" method="POST" action="/upload" enctype="multipart/form-data">
-            <div class="file-input-container">
-                <input type="file" name="firmware" accept=".bin" class="file-input" required>
-            </div>
-            <button type="submit" class="submit-btn">Upload Firmware</button>
-            <div class="progress">
-                <div class="progress-bar"></div>
-            </div>
-        </form>
-    </div>
-    <script>
-        document.querySelector('.upload-form').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const formData = new FormData(this);
-            const progress = document.querySelector('.progress');
-            const progressBar = document.querySelector('.progress-bar');
-            const submitBtn = document.querySelector('.submit-btn');
-            
-            progress.style.display = 'block';
-            submitBtn.disabled = true;
-            submitBtn.textContent = 'Uploading...';
-            
-            fetch('/upload', {
-                method: 'POST',
-                body: formData
-            }).then(response => {
-                if (response.ok) {
-                    progressBar.style.width = '100%';
-                    submitBtn.textContent = 'Upload Complete!';
-                    setTimeout(() => {
-                        progress.style.display = 'none';
-                        submitBtn.disabled = false;
-                        submitBtn.textContent = 'Upload Firmware';
-                        progressBar.style.width = '0%';
-                    }, 2000);
+    <!-- Root element for React -->
+    <div id="root"></div>
+
+    <!-- React component -->
+    <script type="text/babel" data-type="module">
+        // Main App component
+        const App = () => {
+            // State declarations
+            const [firmwareFile, setFirmwareFile] = React.useState(null);
+            const [iconFile, setIconFile] = React.useState(null);
+            const [iconPreview, setIconPreview] = React.useState(null);
+            const [isUploading, setIsUploading] = React.useState(false);
+            const [uploadStatus, setUploadStatus] = React.useState(null);
+            const formRef = React.useRef(null);
+
+            // File handlers
+            const handleFirmwareChange = (event) => {
+                const file = event.target.files[0];
+                if (file?.name.endsWith('.bin')) {
+                    setFirmwareFile(file);
                 }
-            }).catch(error => {
-                submitBtn.textContent = 'Upload Failed';
-                submitBtn.disabled = false;
-                setTimeout(() => {
-                    submitBtn.textContent = 'Upload Firmware';
-                }, 2000);
-            });
-        });
+            };
+
+            const handleIconChange = (event) => {
+                const file = event.target.files[0];
+                if (file?.type === 'image/png') {
+                    setIconFile(file);
+                    const reader = new FileReader();
+                    reader.onload = (e) => setIconPreview(e.target.result);
+                    reader.readAsDataURL(file);
+                }
+            };
+
+            // Form submission
+            const handleSubmit = async (event) => {
+                event.preventDefault();
+                if (!firmwareFile) return;
+
+                setIsUploading(true);
+                setUploadStatus('uploading');
+
+                const formData = new FormData();
+                formData.append('firmware', firmwareFile);
+                if (iconFile) formData.append('icon', iconFile);
+
+                try {
+                    const response = await fetch('/upload', {
+                        method: 'POST',
+                        body: formData
+                    });
+
+                    if (response.ok) {
+                        setUploadStatus('success');
+                        setTimeout(() => {
+                            formRef.current?.reset();
+                            setFirmwareFile(null);
+                            setIconFile(null);
+                            setIconPreview(null);
+                            setUploadStatus(null);
+                        }, 2000);
+                    } else {
+                        throw new Error('Upload failed');
+                    }
+                } catch (error) {
+                    console.error('Upload error:', error);
+                    setUploadStatus('error');
+                } finally {
+                    setIsUploading(false);
+                }
+            };
+
+            // Render component
+            return (
+                <div className="min-h-screen bg-slate-900 text-white p-6">
+                    <div className="max-w-md mx-auto bg-slate-800 rounded-lg p-6 shadow-xl">
+                        <h1 className="text-2xl font-bold text-center mb-6">
+                            M5Stack Firmware Uploader
+                        </h1>
+
+                        <form ref={formRef} onSubmit={handleSubmit} className="space-y-6">
+                            {/* Firmware Upload */}
+                            <div>
+                                <label className="block text-sm font-medium mb-2">
+                                    Firmware File (.bin)
+                                </label>
+                                <div className="border-2 border-dashed border-slate-600 rounded-lg p-4 hover:border-blue-500 transition-colors">
+                                    <input
+                                        type="file"
+                                        accept=".bin"
+                                        onChange={handleFirmwareChange}
+                                        className="w-full"
+                                        required
+                                    />
+                                </div>
+                            </div>
+
+                            {/* Icon Upload */}
+                            <div>
+                                <label className="block text-sm font-medium mb-2">
+                                    Icon (optional)
+                                </label>
+                                <div className="flex space-x-4">
+                                    <div className="flex-1 border-2 border-dashed border-slate-600 rounded-lg p-4 hover:border-blue-500 transition-colors">
+                                        <input
+                                            type="file"
+                                            accept="image/png"
+                                            onChange={handleIconChange}
+                                            className="w-full"
+                                        />
+                                    </div>
+                                    {iconPreview && (
+                                        <div className="w-24 h-24 border border-slate-600 rounded-lg p-2">
+                                            <img
+                                                src={iconPreview}
+                                                alt="Icon preview"
+                                                className="w-full h-full object-contain"
+                                            />
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+
+                            {/* Upload Status */}
+                            {uploadStatus && (
+                                <div className="mt-4">
+                                    <div className="flex justify-between mb-1">
+                                        <span className="text-sm font-medium">
+                                            {uploadStatus === 'uploading' ? 'Uploading...' :
+                                             uploadStatus === 'success' ? 'Upload Complete!' :
+                                             'Upload Failed'}
+                                        </span>
+                                    </div>
+                                    <div className="w-full bg-slate-700 rounded-full h-2">
+                                        <div
+                                            className={`h-2 rounded-full transition-all duration-300 ${
+                                                uploadStatus === 'success' ? 'bg-green-500' :
+                                                uploadStatus === 'error' ? 'bg-red-500' :
+                                                'bg-blue-500'
+                                            }`}
+                                            style={{width: uploadStatus === 'success' ? '100%' : '0%'}}
+                                        />
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Submit Button */}
+                            <button
+                                type="submit"
+                                disabled={!firmwareFile || isUploading}
+                                className={`w-full py-2 px-4 rounded-lg font-medium transition-colors ${
+                                    !firmwareFile || isUploading
+                                        ? 'bg-slate-700 text-slate-400 cursor-not-allowed'
+                                        : 'bg-blue-500 hover:bg-blue-600'
+                                }`}
+                            >
+                                {isUploading ? 'Uploading...' : 'Upload Firmware'}
+                            </button>
+                        </form>
+
+                        {/* Error Message */}
+                        {uploadStatus === 'error' && (
+                            <div className="mt-4 p-4 bg-red-900/50 rounded-lg text-red-200">
+                                Upload failed. Please try again.
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
+        // Mount the React app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
     </script>
 </body>
 </html>
-)";
-        request->send(200, "text/html", html);
+)");
     });
 
+    // Update upload handler to send progress updates
     server.on("/upload", HTTP_POST,
         [](AsyncWebServerRequest *request) { 
-            request->send(200, "text/plain", "File uploaded successfully"); 
+            request->send(200, "text/plain", "Upload successful"); 
         },
         [](AsyncWebServerRequest *request, String filename, size_t index, uint8_t *data, size_t len, bool final) {
-            static File file;
+            static File uploadFile;
+            static String currentFilePath;
             
             if (!index) {
-                file = SD.open(String(FIRMWARE_PATH) + "/" + filename, FILE_WRITE);
+                String uploadPath;
+                if (filename.endsWith(".bin")) {
+                    uploadPath = String(FIRMWARE_PATH) + "/" + filename;
+                } else if (filename.endsWith(".png")) {
+                    if (!SD.exists(ICON_PATH)) {
+                        SD.mkdir(ICON_PATH);
+                    }
+                    uploadPath = String(ICON_PATH) + "/" + filename;
+                } else {
+                    return; // Unsupported file type
+                }
+                
+                Serial.printf("Upload Start: %s\n", uploadPath.c_str());
+                uploadFile = SD.open(uploadPath, FILE_WRITE);
+                currentFilePath = uploadPath;
             }
             
-            if (file && len) {
-                file.write(data, len);
+            if (uploadFile && len) {
+                uploadFile.write(data, len);
             }
             
             if (final) {
-                if (file) file.close();
-                loadFirmwareList();
-                showPopup("Firmware Uploaded!", SUCCESS_COLOR);
+                if (uploadFile) {
+                    uploadFile.close();
+                    Serial.printf("Upload Complete: %s, %u bytes\n", currentFilePath.c_str(), index + len);
+                    
+                    if (currentFilePath.endsWith(".bin")) {
+                        loadFirmwareList(); // Reload firmware list when new firmware is uploaded
+                    }
+                }
             }
-    });
+        }
+    );
 
     server.begin();
     
+    // Show the connection screen
     transitionToScreen([]() {
         M5.Lcd.fillScreen(BG_COLOR);
         drawHeader(false);
@@ -532,6 +1277,14 @@ void showFirmwareOptions(int index) {
         drawHeader(false);
     });
     
+
+    if (firmwareList[index].name == "Settings") {
+        currentScreen = SETTINGS_MENU;
+        drawSettingsMenu();
+        return;
+    }
+
+
     M5.Lcd.setCursor(10, 50);
     M5.Lcd.printf("Selected: %s", firmwareList[index].name.c_str());
     
@@ -619,6 +1372,73 @@ void deleteFirmware(int index) {
     }
 }
 
+void handleButtons() {
+    if (!uiState.isAnimating) {
+        if (currentScreen == MAIN_MENU) {
+            int totalItems = firmwareList.size(); // Total number of items including Settings
+            
+            if (M5.BtnA.wasPressed() && uiState.selectedIndex > 0) {
+                uiState.selectedIndex--;
+                uiState.isAnimating = true;
+                animationStartTime = millis();
+                targetOffset = CIRCLE_SPACING;
+                lastDrawTime = 0;
+            }
+            else if (M5.BtnC.wasPressed() && uiState.selectedIndex < (totalItems - 1)) {
+                uiState.selectedIndex++;
+                uiState.isAnimating = true;
+                animationStartTime = millis();
+                targetOffset = -CIRCLE_SPACING;
+                lastDrawTime = 0;
+            }
+            else if (M5.BtnB.wasPressed()) {
+                // Check if the selected entry is the Settings entry
+                if (firmwareList[uiState.selectedIndex].name == "Settings") {
+                    // Switch to settings menu
+                    currentScreen = SETTINGS_MENU;
+                    drawSettingsMenu();
+                } else {
+                    // Handle firmware entry
+                    showFirmwareOptions(uiState.selectedIndex);
+                }
+            }
+        }
+        else if (currentScreen == SETTINGS_MENU) {
+            if (M5.BtnA.wasPressed()) {
+                // Delete All
+                if (confirmDelete()) {
+                    deleteAllFirmware();
+                    currentScreen = MAIN_MENU;
+                    drawScreen();
+                }
+            }
+            else if (M5.BtnB.wasPressed()) {
+                // WiFi Mode
+                startWiFiServer();
+            }
+            else if (M5.BtnC.wasPressed()) {
+                // Back to main menu
+                currentScreen = MAIN_MENU;
+                drawScreen();
+            }
+        }
+    }
+}
+
+
+void updateAnimation() {
+    if (uiState.isAnimating && (millis() - uiState.lastAnimationUpdate > ANIMATION_DELAY)) {
+        uiState.animationStep++;
+        if (uiState.animationStep >= ANIMATION_STEPS) {
+            uiState.isAnimating = false;
+            uiState.animationStep = 0;
+        }
+        uiState.lastAnimationUpdate = millis();
+        drawScreen();
+        
+    }
+}
+
 bool confirmDelete() {
     M5.Lcd.fillScreen(BG_COLOR);
     drawHeader(false);
@@ -672,10 +1492,10 @@ void handleTouch() {
 
         TouchPoint_t point = M5.Touch.getPressPoint();
 
-        if (currentScreen == MAIN_SCREEN) {
+        if (currentScreen == MAIN_MENU) {
             // Settings button (top-right corner)
             if (point.x >= SCREEN_WIDTH - 50 && point.y <= HEADER_HEIGHT) {
-                currentScreen = SETTINGS_SCREEN;
+                currentScreen = SETTINGS_MENU;
                 transitionToScreen([]() {
                     M5.Lcd.fillScreen(BG_COLOR);
                     drawHeader(false);
@@ -704,6 +1524,17 @@ void handleTouch() {
                 }
                 return;
             }
+            if (point.y >= 50 && point.y < 190) {
+                int index = ((point.y - 50) / (BUTTON_HEIGHT + BUTTON_SPACING)) + (currentPage * MAX_ITEMS_PER_PAGE);
+            if (index >= 0 && index < firmwareList.size()) {
+                if (firmwareList[index].name == "Settings") {
+                    currentScreen = SETTINGS_MENU;
+                    drawSettingsMenu();
+            }   else {
+                    showFirmwareOptions(index);
+            }
+        }}
+        return;
 
             // Navigation buttons
             if (point.y >= 190 && point.y <= 230) {
@@ -717,14 +1548,14 @@ void handleTouch() {
                 }
             }
         }
-        else if (currentScreen == SETTINGS_SCREEN) {
+        else if (currentScreen == SETTINGS_MENU) {
             if (point.y >= 60 && point.y <= 110) {  // Delete All button
                 if (confirmDelete()) {
                     deleteAllFirmware();
                 }
             }
             else if (point.y >= 120 && point.y <= 170) {  // Back button
-                currentScreen = MAIN_SCREEN;
+                currentScreen = MAIN_MENU;
                 drawScreen();
             }
         }
@@ -743,7 +1574,16 @@ void setup() {
     Serial.println("Starting setup...");
 
     enforceFactoryBoot();
-
+    generateGearIcon();
+    generateDefaultIcons();
+    
+    // Create necessary directories
+    if (!SD.exists(FIRMWARE_PATH)) {
+        SD.mkdir(FIRMWARE_PATH);
+    }
+    if (!SD.exists(ICON_PATH)) {
+        SD.mkdir(ICON_PATH);
+    }
 
     // Initialize NVS to store boot state
     esp_err_t err = nvs_flash_init();
@@ -801,6 +1641,7 @@ void setup() {
     }
 
         M5.begin(true, true, true, true);
+        initAnimationBuffer();
     
     // Initialize SD Card
     if (!SD.begin()) {
@@ -981,21 +1822,31 @@ bool executeFirmware(const String& path) {
     return true;
 } 
 
+void checkResetToLauncher() {
+    if (M5.BtnA.isPressed() && M5.BtnB.isPressed() && M5.BtnC.isPressed()) {
+        delay(1000);  // Debounce delay
+        if (M5.BtnA.isPressed() && M5.BtnB.isPressed() && M5.BtnC.isPressed()) {
+            Serial.println("Resetting to launcher...");
+            ESP.restart();
+        }
+    }
+}
+
 void loop() {
     M5.update();
     
-    // Check for long button press to force factory boot
-    if (checkButtonPress()) {
-        Serial.println("Long button press detected, forcing factory boot...");
-        forceFactoryBoot();
-        ESP.restart();
-    }
+    // Check for reset to launcher
+    checkResetToLauncher();
     
-    // Handle touch events
-    handleTouch();
+    // Handle button navigation
+    handleButtons();
+    
+    // Update animation
+    if (uiState.isAnimating) {
+        updateAnimation();
+    }
     
     // Feed watchdog
     esp_task_wdt_reset();
-    
     delay(10);
 }
