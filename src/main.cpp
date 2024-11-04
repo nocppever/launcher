@@ -75,8 +75,8 @@ static uint16_t* drawBuffer = nullptr;
 #define DARKEN_COLOR(color) (((color & 0xF7DE) >> 1) | (color & 0x0821))
 
 // WiFi credentials
-const char* ssid = "Freebox-C2F799";
-const char* password = "k2br9qc4z6qfcr6nq2mmsd";
+const char* ssid = "";
+const char* password = "";
 
 // Global variables
 AsyncWebServer server(80);
