@@ -16,8 +16,8 @@
 #include "funcprot.h"
 
 // WiFi credentials
-const char* ssid = "Freebox-C2F799";
-const char* password = "k2br9qc4z6qfcr6nq2mmsd";
+const char* ssid = "";
+const char* password = "";
 
 static uint16_t* drawBuffer = nullptr;
 
