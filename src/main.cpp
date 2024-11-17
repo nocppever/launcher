@@ -1,4 +1,4 @@
-#include <M5Core2.h>
+#include <PNGdec.h>
 #include <SD.h>
 #include <WiFi.h>
 #include <ESPAsyncWebServer.h>
@@ -11,72 +11,15 @@
 #include <esp_partition.h>
 #include <Preferences.h>
 #include <esp_task_wdt.h>
-
-// Enhanced color scheme
-#define HEADER_COLOR 0x2945  // Darker blue
-#define BUTTON_COLOR 0x4B0D  // Lighter blue
-#define BUTTON_HIGHLIGHT 0x6B4D  // Even lighter blue for hover effect
-#define TEXT_COLOR TFT_WHITE
-#define BG_COLOR 0x1082  // Very dark blue
-#define DANGER_COLOR 0xF800  // Red
-#define SUCCESS_COLOR 0x0640  // Green
-
-// Animation and UI constants
-#define ANIMATION_SPEED 150
-#define MAX_ITEMS_PER_PAGE 4
-#define SCREEN_WIDTH 320
-#define SCREEN_HEIGHT 240
-#define HEADER_HEIGHT 40
-#define BUTTON_HEIGHT 50
-#define BUTTON_SPACING 10
-#define BUTTON_RADIUS 8
-
-// File system constants
-#define FIRMWARE_PATH "/firmware"
-#define APP_PARTITION_LABEL "app0"
-#define LAUNCHER_PARTITION_LABEL "launcher"
-
-#include <esp_task_wdt.h>
-#define WDT_TIMEOUT 15  // Watchdog timeout in seconds
-#define BUTTON_HOLD_TIME 3000  // Time to hold button in ms
-
-
-#define CIRCLE_RADIUS 45
-#define CIRCLE_SPACING 90
-#define CIRCLE_Y 120
-#define ANIMATION_STEPS 10
-#define ANIMATION_DELAY 30
-
-#define DRAW_BUFFER_SIZE (SCREEN_WIDTH * 150)  // Buffer for partial screen updates
-static uint16_t* drawBuffer = nullptr;
-
-
-#define SPRITE_WIDTH 320
-#define SPRITE_HEIGHT 240
-#define EASING_STEPS 40
-#define TRANSITION_DURATION 100 // milliseconds
-
-#define ANIMATION_DURATION 250  // Slightly faster animation
-#define MIN_FRAME_TIME 16      // Cap at ~60fps
-
-#define ANIMATION_BUFFER_HEIGHT 180  // Height of the animation area
-#define ANIMATION_Y_START 40         // Start Y position of animation area
-
-#define RGB565(r,g,b) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
-#define R565(color) ((color >> 11) & 0x1F)
-#define G565(color) ((color >> 5) & 0x3F)
-#define B565(color) (color & 0x1F)
-
-#define ICON_SIZE 64
-#define DEFAULT_ICONS_COUNT 5
-#define ICON_PATH "/icons"
-
-#define RGB565(r, g, b) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
-#define DARKEN_COLOR(color) (((color & 0xF7DE) >> 1) | (color & 0x0821))
+#include "Constants.h"
+#include "launcher_typedef.h"
+#include "funcprot.h"
 
 // WiFi credentials
 const char* ssid = "Freebox-C2F799";
 const char* password = "k2br9qc4z6qfcr6nq2mmsd";
+
+static uint16_t* drawBuffer = nullptr;
 
 // Global variables
 AsyncWebServer server(80);
@@ -87,56 +30,6 @@ RTC_DATA_ATTR esp_partition_t saved_partition;
 RTC_DATA_ATTR int bootCount = 0;
 
 
-struct FirmwareEntry {
-    String name;
-    String path;
-    String iconPath;
-    bool hasCustomIcon;
-    int defaultIconIndex;
-};
-
-enum MenuOption {
-    OPTION_NONE = -1,
-    OPTION_1 = 0,
-    OPTION_2 = 1,
-    OPTION_3 = 2
-};
-
-struct MenuState {
-    MenuOption selectedOption = OPTION_1;
-    bool isAnimating = false;
-    int animationStep = 0;
-};
-
-MenuState menuState;
-
-
-struct IconData {
-    const uint16_t* data;
-    uint16_t width;
-    uint16_t height;
-};
-
-
-
-struct {
-    int selectedIndex = 0;
-    int animationStep = 0;
-    bool isAnimating = false;
-    int animationDirection = 0;  // -1 for left, 1 for right
-    int lastAnimationUpdate = 0;
-} uiState;
-
-
-enum Screen {
-    MAIN_MENU,
-    SETTINGS_MENU,
-    WIFI_MENU,
-    FIRMWARE_OPTIONS
-};
-
-Screen currentScreen = MAIN_MENU;
-std::vector<FirmwareEntry> firmwareList;
 int currentPage = 0;
 int totalPages = 0;
 
@@ -151,23 +44,85 @@ static uint16_t* animationBuffer = nullptr;
 static uint16_t gearIconData[ICON_SIZE * ICON_SIZE];
 static uint16_t defaultIconsData[DEFAULT_ICONS_COUNT][ICON_SIZE * ICON_SIZE];
 
-
-void drawHeader(bool animated);
-void transitionToScreen(void (*drawFunc)());
-void drawScreen();
-void loadFirmwareList();
-bool startWiFiServer();
-void handleTouch();
-bool executeFirmware(const String& path);
-void showFirmwareOptions(int index);
-bool confirmDelete();
-void deleteFirmware(int index);
-void deleteAllFirmware();
-void showPopup(const char* message, uint16_t color, int duration);
-void drawButton(int x, int y, int w, int h, const char* text, uint16_t color, bool rounded);
+static uint16_t* currentIconBuffer = nullptr;
+static int currentIconY = 0;
 
 
+static void pngDraw(PNGDRAW *pDraw) {
+    if (!currentIconBuffer) return;
+    
+    for (int i = 0; i < pDraw->iWidth; i++) {
+        uint16_t color = RGB565(pDraw->pPixels[i * 3],
+                              pDraw->pPixels[i * 3 + 1],
+                              pDraw->pPixels[i * 3 + 2]);
+        currentIconBuffer[currentIconY * ICON_SIZE + i] = color;
+    }
+    currentIconY++;
+}
 
+bool loadPNGIcon(const char* iconPath, uint16_t* iconData) {
+    File pngFile = SD.open(iconPath);
+    if (!pngFile) {
+        Serial.println("Failed to open PNG file");
+        return false;
+    }
+
+    size_t fileSize = pngFile.size();
+    uint8_t* pngBuffer = (uint8_t*)ps_malloc(fileSize);
+    
+    if (!pngBuffer) {
+        Serial.println("Failed to allocate PNG buffer");
+        pngFile.close();
+        return false;
+    }
+
+    size_t bytesRead = pngFile.read(pngBuffer, fileSize);
+    pngFile.close();
+
+    if (bytesRead != fileSize) {
+        Serial.println("Failed to read complete PNG file");
+        free(pngBuffer);
+        return false;
+    }
+
+    // Set up the PNG decoder
+    currentIconBuffer = iconData;
+    currentIconY = 0;
+
+    PNG png;
+    int16_t rc = png.openRAM(pngBuffer, fileSize, (PNG_DRAW_CALLBACK*)pngDraw);
+    
+    if (rc != PNG_SUCCESS) {
+        Serial.println("Failed to open PNG in RAM");
+        free(pngBuffer);
+        return false;
+    }
+
+    // Check dimensions
+    if (png.getWidth() != ICON_SIZE || png.getHeight() != ICON_SIZE) {
+        Serial.printf("Invalid PNG dimensions: %dx%d (expected %dx%d)\n", 
+                     png.getWidth(), png.getHeight(), ICON_SIZE, ICON_SIZE);
+        png.close();
+        free(pngBuffer);
+        return false;
+    }
+
+    // Decode the image
+    rc = png.decode(nullptr, 0);
+    png.close();
+    free(pngBuffer);
+    
+    // Clear globals
+    currentIconBuffer = nullptr;
+    currentIconY = 0;
+    
+    if (rc != PNG_SUCCESS) {
+        Serial.println("PNG decode failed");
+        return false;
+    }
+
+    return true;
+}
 
 void generateGearIcon() {
     const int teeth = 12;
@@ -325,32 +280,36 @@ uint16_t dimColor(uint16_t color, uint8_t factor) {
 }
 
 
-
+// Function that ouputs the lill buttons on the bottom of the screen and does the ispressed logic managt
 void drawButtonHints(const char* btnA, const char* btnB, const char* btnC) {
-    uint16_t normalColor = BUTTON_COLOR;
-    uint16_t pressedColor = BUTTON_HIGHLIGHT;
+    M5.Lcd.setTextSize(1);
+    
+    // Draw divider line
+    M5.Lcd.drawFastHLine(0, SCREEN_HEIGHT - 40, SCREEN_WIDTH, BUTTON_COLOR);
 
     // Button A (Left)
-    uint16_t colorA = M5.BtnA.isPressed() ? pressedColor : normalColor;
-    M5.Lcd.fillRoundRect(5, SCREEN_HEIGHT-30, 70, 20, 5, colorA);
-    M5.Lcd.setTextColor(TEXT_COLOR);
-    M5.Lcd.setTextSize(1);
-    M5.Lcd.setCursor(15, SCREEN_HEIGHT-25);
-    M5.Lcd.print(btnA);
+    if (strlen(btnA) > 0) {
+        M5.Lcd.setTextColor(TEXT_COLOR);
+        M5.Lcd.setCursor(10, SCREEN_HEIGHT - 25);
+        M5.Lcd.print("(A) ");
+        M5.Lcd.print(btnA);
+    }
 
     // Button B (Center)
-    uint16_t colorB = M5.BtnB.isPressed() ? pressedColor : normalColor;
-    M5.Lcd.fillRoundRect(SCREEN_WIDTH/2-35, SCREEN_HEIGHT-30, 70, 20, 5, colorB);
-    M5.Lcd.setTextColor(TEXT_COLOR);
-    M5.Lcd.setCursor(SCREEN_WIDTH/2-25, SCREEN_HEIGHT-25);
-    M5.Lcd.print(btnB);
+    if (strlen(btnB) > 0) {
+        M5.Lcd.setTextColor(TEXT_COLOR);
+        M5.Lcd.setCursor(SCREEN_WIDTH/2 - 30, SCREEN_HEIGHT - 25);
+        M5.Lcd.print("(B) ");
+        M5.Lcd.print(btnB);
+    }
 
     // Button C (Right)
-    uint16_t colorC = M5.BtnC.isPressed() ? pressedColor : normalColor;
-    M5.Lcd.fillRoundRect(SCREEN_WIDTH-75, SCREEN_HEIGHT-30, 70, 20, 5, colorC);
-    M5.Lcd.setTextColor(TEXT_COLOR);
-    M5.Lcd.setCursor(SCREEN_WIDTH-65, SCREEN_HEIGHT-25);
-    M5.Lcd.print(btnC);
+    if (strlen(btnC) > 0) {
+        M5.Lcd.setTextColor(TEXT_COLOR);
+        M5.Lcd.setCursor(SCREEN_WIDTH - 70, SCREEN_HEIGHT - 25);
+        M5.Lcd.print("(C) ");
+        M5.Lcd.print(btnC);
+    }
 }
 
 
@@ -667,25 +626,32 @@ void loadFirmwareList() {
     firmwareList.push_back(settingsEntry);
 }
 
-
+// TO BE MODIFIED 
 
 void drawSettingsMenu() {
     M5.Lcd.fillScreen(BG_COLOR);
     drawHeader(false);
 
-    // Draw menu options centered and bigger
-    int yPos = SCREEN_HEIGHT/2 - 80;  // Start higher for better spacing
-    
-    // Delete All (Button A)
-    drawButton(40, yPos, SCREEN_WIDTH - 80, BUTTON_HEIGHT, "Delete All", DANGER_COLOR, true);
-    
-    // WiFi Mode (Button B)
-    drawButton(40, yPos + 70, SCREEN_WIDTH - 80, BUTTON_HEIGHT, "WiFi Mode", BUTTON_COLOR, true);
-    
-    // Back (Button C)
-    drawButton(40, yPos + 140, SCREEN_WIDTH - 80, BUTTON_HEIGHT, "Back", BUTTON_COLOR, true);
+    // Draw title
+    M5.Lcd.setTextColor(TEXT_COLOR);
+    M5.Lcd.setTextSize(2);
+    M5.Lcd.setCursor(20, 60);
+    M5.Lcd.println("Settings");
 
-    // Draw button hints
+    // Draw options list
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setCursor(20, 100);
+    M5.Lcd.println("Available actions:");
+    
+    M5.Lcd.setCursor(20, 120);
+    M5.Lcd.setTextColor(DANGER_COLOR);  // Red for delete
+    M5.Lcd.println("- Delete all firmwares");
+    
+    M5.Lcd.setTextColor(TEXT_COLOR);
+    M5.Lcd.setCursor(20, 140);
+    M5.Lcd.println("- WiFi upload mode");
+
+    // Draw button hints at the bottom
     drawButtonHints("Delete", "WiFi", "Back");
 }
 
@@ -716,12 +682,10 @@ void drawCircleInBuffer(int x0, int y0, int r, uint16_t color,
     }
 }
 
-// Helper function to draw text in buffer
     const uint8_t font8x6[96][8] = {
-        // Define the font8x6 array here with appropriate values
-        // Example for character 'A' (ASCII 65):
-        {0x00, 0x7C, 0x12, 0x11, 0x12, 0x7C, 0x00, 0x00}, // 'A'
-        // Add other characters as needed
+        
+        {0x00, 0x7C, 0x12, 0x11, 0x12, 0x7C, 0x00, 0x00}, 
+        
     };
     
 void drawTextInBuffer(int x, int y, const char* text, bool selected, 
@@ -1272,63 +1236,59 @@ bool startWiFiServer() {
 }
 
 void showFirmwareOptions(int index) {
-    transitionToScreen([]() {
-        M5.Lcd.fillScreen(BG_COLOR);
-        drawHeader(false);
-    });
+    M5.Lcd.fillScreen(BG_COLOR);
+    drawHeader(false);
     
-
+    // Don't process if it's the settings entry
     if (firmwareList[index].name == "Settings") {
         currentScreen = SETTINGS_MENU;
         drawSettingsMenu();
         return;
     }
 
+    // Draw firmware name
+    M5.Lcd.setTextColor(TEXT_COLOR);
+    M5.Lcd.setTextSize(2);
+    M5.Lcd.setCursor(20, 60);
+    M5.Lcd.print(firmwareList[index].name);
 
-    M5.Lcd.setCursor(10, 50);
-    M5.Lcd.printf("Selected: %s", firmwareList[index].name.c_str());
+    // Draw options list
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setCursor(20, 100);
+    M5.Lcd.println("Available actions:");
     
-    const char* options[] = {"Launch", "Delete", "Back"};
-    uint16_t colors[] = {BUTTON_COLOR, DANGER_COLOR, BUTTON_COLOR};
+    M5.Lcd.setCursor(20, 120);
+    M5.Lcd.println("- Launch firmware");
     
-    for (int i = 0; i < 3; i++) {
-        int yPos = 90 + i * 60;
-        int xPos = -SCREEN_WIDTH;
-        
-        while (xPos < 40) {
-            M5.Lcd.fillRect(0, yPos, SCREEN_WIDTH, BUTTON_HEIGHT, BG_COLOR);
-            drawButton(xPos, yPos, SCREEN_WIDTH - 80, BUTTON_HEIGHT, 
-                      options[i], colors[i], false);
-            xPos += 20;
-            delay(5);
-        }
-    }
-    
+    M5.Lcd.setTextColor(DANGER_COLOR);  // Red for delete
+    M5.Lcd.setCursor(20, 140);
+    M5.Lcd.println("- Delete firmware");
+
+    // Draw button hints
+    drawButtonHints("Launch", "Delete", "Back");
+
+    // Handle button presses
     bool waiting = true;
     while (waiting) {
         M5.update();
-        if (M5.Touch.ispressed()) {
-            TouchPoint_t p = M5.Touch.getPressPoint();
-            
-            if (p.y >= 90 && p.y < 140) {  // Launch
-                executeFirmware(firmwareList[index].path);
+        
+        if (M5.BtnA.wasPressed()) {
+            // Launch firmware
+            executeFirmware(firmwareList[index].path);
+            waiting = false;
+        }
+        else if (M5.BtnB.wasPressed()) {
+            // Delete firmware
+            if (confirmDelete()) {
+                deleteFirmware(index);
                 waiting = false;
-            }
-            else if (p.y >= 150 && p.y < 200) {  // Delete
-                if (confirmDelete()) {
-                    deleteFirmware(index);
-                    waiting = false;
-                }
-            }
-            else if (p.y >= 210 && p.y < 260) {  // Back
-                waiting = false;
-            }
-            
-            while (M5.Touch.ispressed()) {
-                M5.update();
-                delay(10);
             }
         }
+        else if (M5.BtnC.wasPressed()) {
+            // Back
+            waiting = false;
+        }
+        
         delay(10);
     }
     
@@ -1443,41 +1403,45 @@ bool confirmDelete() {
     M5.Lcd.fillScreen(BG_COLOR);
     drawHeader(false);
     
+    // Draw warning message
+    M5.Lcd.setTextColor(DANGER_COLOR);
+    M5.Lcd.setTextSize(2);
     M5.Lcd.setCursor(20, 60);
-    M5.Lcd.print("Are you sure you want");
-    M5.Lcd.setCursor(20, 85);
-    M5.Lcd.print("to delete this firmware?");
+    M5.Lcd.println("Warning!");
     
-    drawButton(40, 160, 100, 40, "Yes", DANGER_COLOR, false);
-    drawButton(180, 160, 100, 40, "No", BUTTON_COLOR, false);
+    M5.Lcd.setTextColor(TEXT_COLOR);
+    M5.Lcd.setTextSize(1);
+    M5.Lcd.setCursor(20, 90);
+    M5.Lcd.println("Are you sure you want to");
+    M5.Lcd.setCursor(20, 110);
+    M5.Lcd.println("delete this firmware?");
+    M5.Lcd.setCursor(20, 130);
+    M5.Lcd.println("This action cannot be undone.");
+    
+    // Draw button hints
+    drawButtonHints("Yes", "", "No");
     
     bool confirmed = false;
     bool waiting = true;
     
     while (waiting) {
         M5.update();
-        if (M5.Touch.ispressed()) {
-            TouchPoint_t p = M5.Touch.getPressPoint();
-            if (p.y >= 160 && p.y <= 200) {
-                if (p.x >= 40 && p.x <= 140) {
-                    confirmed = true;
-                    waiting = false;
-                }
-                else if (p.x >= 180 && p.x <= 280) {
-                    confirmed = false;
-                    waiting = false;
-                }
-            }
-            while (M5.Touch.ispressed()) {
-                M5.update();
-                delay(10);
-            }
+        
+        if (M5.BtnA.wasPressed()) {
+            confirmed = true;
+            waiting = false;
         }
+        else if (M5.BtnC.wasPressed()) {
+            confirmed = false;
+            waiting = false;
+        }
+        
         delay(10);
     }
     
     return confirmed;
 }
+
 
 void handleTouch() {
     static uint32_t lastTouchTime = 0;
@@ -1587,6 +1551,7 @@ void setup() {
 
     // Initialize NVS to store boot state
     esp_err_t err = nvs_flash_init();
+    
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP.restart();
     }
@@ -1761,16 +1726,19 @@ bool executeFirmware(const String& path) {
         return false;
     }
 
+
+
+    // WHEN PROMPTING USER TO LAUNCH OR STAY IN LAUNCHER, CHANGE THE UI (NOT ERGONOMIC)
+
     // Launch menu
     M5.Lcd.fillScreen(BG_COLOR);
     drawHeader(false);
     M5.Lcd.setCursor(10, 60);
     M5.Lcd.print("Update successful!");
-    M5.Lcd.setCursor(10, 100);
-    M5.Lcd.print("What would you like to do?");
-    
     drawButton(20, 140, 280, 40, "Launch Now", BUTTON_COLOR, false);
     drawButton(20, 190, 280, 40, "Stay in Launcher", BUTTON_COLOR, false);
+
+    //////////////////////////////////////////////////////////////////////////////
     
     bool waiting = true;
     bool launch = false;
